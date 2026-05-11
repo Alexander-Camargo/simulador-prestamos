@@ -1,0 +1,45 @@
+name: Trigger auto deployment for simulador-prestamos-alexa
+
+# When this action will be executed
+on:
+  # Automatically trigger it when detected changes in repo
+  push:
+    branches: 
+      [ main ]
+    paths:
+    - '**'
+    - '.github/workflows/simulador-prestamos-alexa-AutoDeployTrigger-4894a5f5-6864-4a7b-a7cd-3136f5ce9bac.yml'
+
+  # Allow manual trigger 
+  workflow_dispatch:
+      
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.SIMULADORPRESTAMOSALEXA_AZURE_CREDENTIALS }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          _dockerfilePathKey_: _dockerfilePath_
+          _targetLabelKey_: _targetLabel_
+          registryUrl: registrosimuladoralex.azurecr.io
+          registryUsername: ${{ secrets.SIMULADORPRESTAMOSALEXA_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.SIMULADORPRESTAMOSALEXA_REGISTRY_PASSWORD }}
+          containerAppName: simulador-prestamos-alexa
+          resourceGroup: RG_Simulador
+          imageToBuild: registrosimuladoralex.azurecr.io/simulador-prestamos-alexa:${{ github.sha }}
+          
+            
+
+     
+
