@@ -14,32 +14,41 @@ const App = () => {
   const [tipoAbono, setTipoAbono] = useState('porcentaje');
   const [abonoInicialInput, setAbonoInicialInput] = useState(10);
 
-  // --- Estados de Guardado (Independiente de Firebase) ---
+  // --- Estados de la Base de Datos ---
   const [nombrePrestamo, setNombrePrestamo] = useState('');
   const [prestamosGuardados, setPrestamosGuardados] = useState([]);
 
-  // --- Comunicación con el Backend Node.js ---
+  // --- 1. CARGAR DATOS AL INICIAR ---
   useEffect(() => {
+    // Esta ruta relativa funciona porque el backend sirve el frontend
     fetch('/api/prestamos')
       .then(res => {
-        if (!res.ok) throw new Error('Servidor no disponible');
+        if (!res.ok) throw new Error('Error al conectar con el servidor');
         return res.json();
       })
       .then(data => setPrestamosGuardados(data))
       .catch(err => {
-        console.log("Usando almacenamiento en memoria para la vista previa local.");
+        console.warn("Servidor no detectado. Los datos no se guardarán permanentemente.");
       });
   }, []);
 
+  // --- 2. GUARDAR EN COSMOS DB ---
   const guardarPrestamo = async () => {
     if (!nombrePrestamo.trim()) return;
     
     const prestamoData = {
-      id: crypto.randomUUID(),
+      id: crypto.randomUUID(), // Cosmos DB necesita un string ID único
       nombre: nombrePrestamo,
-      monto, anios, tasaAnual, pagoExtra, frecuenciaExtra, 
-      seguroMensual, comisionMensual, sueldoQuincenal, 
-      tipoAbono, abonoInicialInput,
+      monto, 
+      anios, 
+      tasaAnual, 
+      pagoExtra, 
+      frecuenciaExtra, 
+      seguroMensual, 
+      comisionMensual, 
+      sueldoQuincenal, 
+      tipoAbono, 
+      abonoInicialInput,
       fechaCreacion: Date.now()
     };
 
@@ -52,17 +61,20 @@ const App = () => {
       
       if (response.ok) {
         const dataGuardada = await response.json();
+        // Actualizamos la lista con el objeto que nos devuelve el servidor
         setPrestamosGuardados(prev => [dataGuardada, ...prev]);
+        setNombrePrestamo(''); // Limpiamos el campo de nombre
       } else {
-        throw new Error('Error en el backend');
+        throw new Error('Error al guardar en el servidor');
       }
     } catch (error) {
-      setPrestamosGuardados(prev => [prestamoData, ...prev]);
+      console.error("Error:", error);
+      // Fallback local por si el servidor falla (opcional)
+      alert("No se pudo conectar con la base de datos de Azure.");
     }
-    
-    setNombrePrestamo('');
   };
 
+  // --- 3. CARGAR UN PRÉSTAMO EXISTENTE ---
   const cargarPrestamo = (p) => {
     setNombrePrestamo(p.nombre || '');
     setMonto(p.monto);
@@ -77,20 +89,22 @@ const App = () => {
     setAbonoInicialInput(p.abonoInicialInput);
   };
 
+  // --- 4. ELIMINAR DE COSMOS DB ---
   const eliminarPrestamo = async (id) => {
     try {
       const response = await fetch(`/api/prestamos/${id}`, { method: 'DELETE' });
       if (response.ok) {
+        // Filtramos la lista local para que desaparezca de la vista inmediatamente
         setPrestamosGuardados(prev => prev.filter(p => p.id !== id));
       } else {
-        throw new Error('Error eliminando en backend');
+        throw new Error('Error al eliminar');
       }
     } catch (error) {
-      setPrestamosGuardados(prev => prev.filter(p => p.id !== id));
+      console.error("Error al eliminar:", error);
     }
   };
 
-  // --- Utilidades ---
+  // --- UTILIDADES ---
   const formatoMoneda = (valor) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
@@ -100,26 +114,21 @@ const App = () => {
     }).format(valor);
   };
 
-  // --- Cálculo Matemático de la Tabla ---
+  // --- LÓGICA MATEMÁTICA ---
   const { tabla, resumen } = useMemo(() => {
     const tasaMensual = tasaAnual / 100 / 12;
     const mesesTotales = anios * 12;
     
-    let abonoInicialReal = 0;
-    if (tipoAbono === 'porcentaje') {
-      abonoInicialReal = monto * (abonoInicialInput / 100);
-    } else {
-      abonoInicialReal = abonoInicialInput;
-    }
+    let abonoInicialReal = (tipoAbono === 'porcentaje') 
+      ? monto * (abonoInicialInput / 100) 
+      : abonoInicialInput;
+
     const montoFinanciar = Math.max(0, monto - abonoInicialReal);
     const sueldoMensual = sueldoQuincenal * 2;
 
-    let pagoMensualBase = 0;
-    if (tasaMensual === 0) {
-      pagoMensualBase = montoFinanciar / mesesTotales;
-    } else {
-      pagoMensualBase = montoFinanciar * (tasaMensual * Math.pow(1 + tasaMensual, mesesTotales)) / (Math.pow(1 + tasaMensual, mesesTotales) - 1);
-    }
+    let pagoMensualBase = (tasaMensual === 0)
+      ? montoFinanciar / mesesTotales
+      : montoFinanciar * (tasaMensual * Math.pow(1 + tasaMensual, mesesTotales)) / (Math.pow(1 + tasaMensual, mesesTotales) - 1);
 
     let saldo = parseFloat(montoFinanciar);
     let mesActual = 1;
@@ -138,12 +147,11 @@ const App = () => {
       }
 
       const totalCapital = capital + abonoExtraEsteMes;
-      const saldoFinal = saldo - totalCapital;
+      const saldoFinal = Math.max(0, saldo - totalCapital);
       const segurosYComisiones = parseFloat(seguroMensual) + parseFloat(comisionMensual);
       const pagoTotal = capital + interes + abonoExtraEsteMes + segurosYComisiones;
       
-      const pagoFijoSinExtra = capital + interes + segurosYComisiones;
-      const sueldoRestante = sueldoMensual - pagoFijoSinExtra;
+      const sueldoRestante = sueldoMensual - (capital + interes + segurosYComisiones);
 
       datosTabla.push({
         mes: mesActual,
@@ -156,7 +164,7 @@ const App = () => {
         pagoExtra: abonoExtraEsteMes,
         segurosYComisiones: segurosYComisiones,
         sueldoRestante: sueldoRestante,
-        saldoFinal: Math.abs(saldoFinal) < 0.01 ? 0 : saldoFinal,
+        saldoFinal: saldoFinal,
         esFinDeAno: mesActual % 12 === 0,
         anoCorrespondiente: Math.ceil(mesActual / 12)
       });
@@ -170,11 +178,11 @@ const App = () => {
     return {
       tabla: datosTabla,
       resumen: {
-        montoFinanciar: montoFinanciar,
+        montoFinanciar,
         abonoInicial: abonoInicialReal,
         pagoMensualEstimado: pagoMensualBase + parseFloat(seguroMensual) + parseFloat(comisionMensual),
-        totalIntereses: totalIntereses,
-        totalAbonoExtra: totalAbonoExtra,
+        totalIntereses,
+        totalAbonoExtra,
         mesesReales: mesActual - 1,
         ahorroTiempo: mesesTotales - (mesActual - 1)
       }
@@ -183,26 +191,18 @@ const App = () => {
 
   const handleExportarCSV = () => {
     let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
-    
     csvContent += "RESUMEN DEL PRESTAMO\n";
-    csvContent += `Monto Original,${monto}\n`;
-    csvContent += `Abono Inicial (Enganche),${resumen.abonoInicial}\n`;
-    csvContent += `Monto a Financiar,${resumen.montoFinanciar}\n`;
-    csvContent += `Tasa Anual (%),${tasaAnual}\n`;
-    csvContent += `Plazo Original (Anios),${anios}\n`;
-    csvContent += `Sueldo Quincenal,${sueldoQuincenal}\n`;
-    csvContent += `Sueldo Mensual,${sueldoQuincenal * 2}\n\n`;
-
-    csvContent += "Mes,Saldo Inicial,Pago Total,Capital,Interes,Pago Extra,Seguros y Comisiones,Saldo Final,Sueldo Mensual,Sueldo Restante\n";
+    csvContent += `Monto Original,${monto}\nAbono Inicial,${resumen.abonoInicial}\nMonto a Financiar,${resumen.montoFinanciar}\n\n`;
+    csvContent += "Mes,Saldo Inicial,Pago Total,Capital,Interes,Pago Extra,Seguros,Saldo Final\n";
 
     tabla.forEach(row => {
-      csvContent += `${row.mes},${row.saldoInicial.toFixed(2)},${row.pagoTotal.toFixed(2)},${row.capital.toFixed(2)},${row.interes.toFixed(2)},${row.pagoExtra.toFixed(2)},${row.segurosYComisiones.toFixed(2)},${row.saldoFinal.toFixed(2)},${row.sueldoMensual.toFixed(2)},${row.sueldoRestante.toFixed(2)}\n`;
+      csvContent += `${row.mes},${row.saldoInicial.toFixed(2)},${row.pagoTotal.toFixed(2)},${row.capital.toFixed(2)},${row.interes.toFixed(2)},${row.pagoExtra.toFixed(2)},${row.segurosYComisiones.toFixed(2)},${row.saldoFinal.toFixed(2)}\n`;
     });
 
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "Simulador_Amortizacion.csv");
+    link.setAttribute("download", "Simulacion_Prestamo.csv");
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -219,48 +219,49 @@ const App = () => {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Simulador de Préstamo Interactivo</h1>
-            <p className="text-gray-500 text-sm">Ajusta las variables para ver cómo impactan los pagos a capital en el tiempo.</p>
+            <p className="text-gray-500 text-sm">Gestionado con Node.js y Azure Cosmos DB.</p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* Panel Lateral - Controles */}
+          {/* Panel Lateral */}
           <div className="lg:col-span-1 space-y-6">
 
-            {/* Panel de Guardado Independiente */}
+            {/* Guardado y Lista de Préstamos */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 bg-gradient-to-br from-blue-50 to-white">
               <h2 className="text-lg font-semibold mb-4 flex items-center text-blue-800">
                 <Save size={20} className="mr-2" />
-                Mis Préstamos Guardados
+                Guardar en la Nube
               </h2>
               <div className="space-y-4">
                 <div className="flex space-x-2">
                   <input 
                     type="text" 
-                    placeholder="Nombre (ej. Auto, Casa...)"
+                    placeholder="Nombre del proyecto..."
                     value={nombrePrestamo}
                     onChange={(e) => setNombrePrestamo(e.target.value)}
-                    className="flex-1 px-3 py-2 bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                    className="flex-1 px-3 py-2 bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
                   />
                   <button 
                     onClick={guardarPrestamo}
                     disabled={!nombrePrestamo.trim()}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 text-sm font-medium transition-colors"
                   >
                     Guardar
                   </button>
                 </div>
+
                 {prestamosGuardados.length > 0 && (
                   <div className="mt-4 border-t border-gray-100 pt-4">
                     <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-2">
                       {prestamosGuardados.map(p => (
-                        <div key={p.id} className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:border-blue-300 hover:shadow-sm transition-all group">
+                        <div key={p.id} className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:border-blue-300 transition-all group">
                           <button onClick={() => cargarPrestamo(p)} className="flex-1 flex items-center text-left truncate">
-                            <FolderOpen size={16} className="text-blue-500 mr-2 flex-shrink-0 opacity-70 group-hover:opacity-100" />
-                            <span className="text-sm font-medium text-gray-700 group-hover:text-blue-700 truncate">{p.nombre}</span>
+                            <FolderOpen size={16} className="text-blue-500 mr-2 opacity-70 group-hover:opacity-100" />
+                            <span className="text-sm font-medium text-gray-700 truncate">{p.nombre}</span>
                           </button>
-                          <button onClick={() => eliminarPrestamo(p.id)} className="ml-2 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors flex-shrink-0">
+                          <button onClick={() => eliminarPrestamo(p.id)} className="ml-2 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors">
                             <Trash2 size={16} />
                           </button>
                         </div>
@@ -271,209 +272,116 @@ const App = () => {
               </div>
             </div>
 
-            {/* Variables Principales */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-semibold mb-4 flex items-center text-gray-800">
-                <AlertCircle size={20} className="mr-2 text-blue-500"/>
-                Variables Principales
-              </h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto del Préstamo</label>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><DollarSign size={16} className="text-gray-400" /></div>
-                    <input type="number" value={monto} onChange={(e) => setMonto(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"/>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Plazo (Años)</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Calendar size={16} className="text-gray-400" /></div>
-                      <input type="number" value={anios} onChange={(e) => setAnios(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"/>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Interés Anual</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Percent size={16} className="text-gray-400" /></div>
-                      <input type="number" value={tasaAnual} onChange={(e) => setTasaAnual(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"/>
-                    </div>
-                  </div>
+            {/* Controles de Variables */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-4">
+              <h2 className="text-lg font-semibold flex items-center"><AlertCircle size={20} className="mr-2 text-blue-500"/>Variables</h2>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Monto del Préstamo</label>
+                <div className="relative">
+                  <DollarSign size={16} className="absolute left-3 top-3 text-gray-400" />
+                  <input type="number" value={monto} onChange={(e) => setMonto(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"/>
                 </div>
               </div>
-            </div>
 
-            {/* Ingresos y Abono Inicial */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-semibold mb-4 flex items-center text-gray-800">
-                <Wallet size={20} className="mr-2 text-indigo-500"/>
-                Ingresos y Abono Inicial
-              </h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Sueldo Quincenal</label>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Banknote size={16} className="text-gray-400" /></div>
-                    <input type="number" value={sueldoQuincenal} onChange={(e) => setSueldoQuincenal(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"/>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Abono Inicial (Enganche)</label>
-                  <div className="flex space-x-2">
-                    <select value={tipoAbono} onChange={(e) => setTipoAbono(e.target.value)} className="w-1/3 px-2 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-sm">
-                      <option value="porcentaje">% del Monto</option>
-                      <option value="fijo">Monto Fijo</option>
-                    </select>
-                    <div className="relative w-2/3">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">{tipoAbono === 'porcentaje' ? <Percent size={14} className="text-gray-400" /> : <DollarSign size={14} className="text-gray-400" />}</div>
-                      <input type="number" value={abonoInicialInput} onChange={(e) => setAbonoInicialInput(Number(e.target.value))} className="w-full pl-8 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"/>
-                    </div>
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">Equivale a: {formatoMoneda(resumen.abonoInicial)}</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Pagos Extra */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-semibold mb-4 flex items-center text-gray-800">
-                <TrendingDown size={20} className="mr-2 text-green-500"/>
-                Pagos Extra a Capital
-              </h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Monto del Pago Extra</label>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><DollarSign size={16} className="text-gray-400" /></div>
-                    <input type="number" value={pagoExtra} onChange={(e) => setPagoExtra(Number(e.target.value))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none transition-all"/>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Frecuencia (Cada X meses)</label>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Clock size={16} className="text-gray-400" /></div>
-                    <input type="number" min="1" value={frecuenciaExtra} onChange={(e) => setFrecuenciaExtra(Math.max(1, Number(e.target.value)))} className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none transition-all"/>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Seguros */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-semibold mb-4 flex items-center text-gray-800">
-                <Shield size={20} className="mr-2 text-purple-500"/>
-                Seguros y Comisiones
-              </h2>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Seguro Mensual</label>
-                  <input type="number" value={seguroMensual} onChange={(e) => setSeguroMensual(Number(e.target.value))} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none transition-all"/>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Años</label>
+                  <input type="number" value={anios} onChange={(e) => setAnios(Number(e.target.value))} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none"/>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Otras Comisiones</label>
-                  <input type="number" value={comisionMensual} onChange={(e) => setComisionMensual(Number(e.target.value))} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none transition-all"/>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tasa %</label>
+                  <input type="number" value={tasaAnual} onChange={(e) => setTasaAnual(Number(e.target.value))} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none"/>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Sueldo Quincenal</label>
+                <input type="number" value={sueldoQuincenal} onChange={(e) => setSueldoQuincenal(Number(e.target.value))} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none"/>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Pago Extra a Capital</label>
+                <div className="flex space-x-2">
+                  <input type="number" value={pagoExtra} onChange={(e) => setPagoExtra(Number(e.target.value))} className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none"/>
+                  <input type="number" title="Frecuencia en meses" value={frecuenciaExtra} onChange={(e) => setFrecuenciaExtra(Number(e.target.value))} className="w-16 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none"/>
                 </div>
               </div>
             </div>
-
           </div>
 
-          {/* Área Principal - Resumen y Tabla */}
+          {/* Área Principal */}
           <div className="lg:col-span-2 space-y-6">
             
             {/* Tarjetas de Resumen */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-                <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">Monto a Financiar</span>
-                <span className="text-xl font-bold text-gray-900 mt-1">{formatoMoneda(resumen.montoFinanciar)}</span>
+              <div className="bg-white p-4 rounded-xl border border-gray-100">
+                <span className="text-[10px] text-gray-500 uppercase font-bold">Monto Real</span>
+                <div className="text-lg font-bold">{formatoMoneda(resumen.montoFinanciar)}</div>
               </div>
-              <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-                <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">Pago Mensual</span>
-                <span className="text-xl font-bold text-gray-900 mt-1">{formatoMoneda(resumen.pagoMensualEstimado)}</span>
+              <div className="bg-white p-4 rounded-xl border border-gray-100">
+                <span className="text-[10px] text-gray-500 uppercase font-bold">Cuota Total</span>
+                <div className="text-lg font-bold">{formatoMoneda(resumen.pagoMensualEstimado)}</div>
               </div>
-              <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-                <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">Total Intereses</span>
-                <span className="text-xl font-bold text-red-600 mt-1">{formatoMoneda(resumen.totalIntereses)}</span>
+              <div className="bg-white p-4 rounded-xl border border-red-100 bg-red-50">
+                <span className="text-[10px] text-red-700 uppercase font-bold">Intereses</span>
+                <div className="text-lg font-bold text-red-700">{formatoMoneda(resumen.totalIntereses)}</div>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-green-200 bg-green-50 flex flex-col justify-center">
-                <span className="text-xs text-green-700 font-medium uppercase tracking-wider">Total Extra Aportado</span>
-                <span className="text-xl font-bold text-green-700 mt-1">{formatoMoneda(resumen.totalAbonoExtra)}</span>
+              <div className="bg-white p-4 rounded-xl border border-green-100 bg-green-50">
+                <span className="text-[10px] text-green-700 uppercase font-bold">Ahorro Extra</span>
+                <div className="text-lg font-bold text-green-700">{formatoMoneda(resumen.totalAbonoExtra)}</div>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-blue-200 bg-blue-50 flex flex-col justify-center">
-                <span className="text-xs text-blue-700 font-medium uppercase tracking-wider">Meses a Liquidar</span>
-                <div className="flex flex-col mt-1">
-                  <span className="text-xl font-bold text-blue-700">{resumen.mesesReales}</span>
-                  {resumen.ahorroTiempo > 0 && (
-                    <span className="text-[10px] font-semibold text-green-600 mt-0.5">-{resumen.ahorroTiempo} meses ahorrados</span>
-                  )}
-                </div>
+              <div className="bg-white p-4 rounded-xl border border-blue-100 bg-blue-50">
+                <span className="text-[10px] text-blue-700 uppercase font-bold">Plazo Real</span>
+                <div className="text-lg font-bold text-blue-700">{resumen.mesesReales} meses</div>
               </div>
             </div>
 
-            {/* Tabla de Excel */}
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col h-[700px]">
+            {/* Tabla de Resultados */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col h-[600px]">
               <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
-                <h3 className="font-semibold text-gray-800">Desglose Mensual</h3>
-                <button onClick={handleExportarCSV} className="flex items-center space-x-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg transition-colors">
+                <h3 className="font-semibold">Amortización Detallada</h3>
+                <button onClick={handleExportarCSV} className="flex items-center space-x-2 text-sm text-blue-600 font-bold hover:underline">
                   <Download size={16} />
-                  <span>Exportar a CSV</span>
+                  <span>Descargar CSV</span>
                 </button>
               </div>
               <div className="overflow-x-auto flex-1 custom-scrollbar">
-                <table className="w-full text-sm text-left">
-                  <thead className="text-xs text-gray-600 uppercase bg-gray-100 sticky top-0 z-10 shadow-sm">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-gray-100 sticky top-0">
                     <tr>
-                      <th className="px-4 py-3 whitespace-nowrap">Mes</th>
-                      <th className="px-4 py-3 whitespace-nowrap">Saldo Inicial</th>
-                      <th className="px-4 py-3 whitespace-nowrap bg-blue-50/50">Pago Total</th>
-                      <th className="px-4 py-3 whitespace-nowrap">Capital</th>
-                      <th className="px-4 py-3 whitespace-nowrap text-red-600">Interés</th>
-                      <th className="px-4 py-3 whitespace-nowrap text-green-600">Pago Extra</th>
-                      <th className="px-4 py-3 whitespace-nowrap text-purple-600">Seguros/Com.</th>
-                      <th className="px-4 py-3 whitespace-nowrap">Saldo Final</th>
-                      <th className="px-4 py-3 whitespace-nowrap bg-indigo-50">Sueldo Mensual</th>
-                      <th className="px-4 py-3 whitespace-nowrap bg-indigo-50">Sueldo Restante</th>
+                      <th className="px-4 py-3">Mes</th>
+                      <th className="px-4 py-3">Saldo</th>
+                      <th className="px-4 py-3">Pago</th>
+                      <th className="px-4 py-3">Capital</th>
+                      <th className="px-4 py-3">Interés</th>
+                      <th className="px-4 py-3">Extra</th>
+                      <th className="px-4 py-3">Restante</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {tabla.map((fila, index) => (
-                      <React.Fragment key={index}>
-                        <tr className={`hover:bg-gray-50 transition-colors ${fila.pagoExtra > 0 ? 'bg-green-50/20' : ''}`}>
-                          <td className="px-4 py-3 font-medium text-gray-900">{fila.mes}</td>
-                          <td className="px-4 py-3">{formatoMoneda(fila.saldoInicial)}</td>
-                          <td className="px-4 py-3 font-semibold bg-blue-50/20">{formatoMoneda(fila.pagoTotal)}</td>
-                          <td className="px-4 py-3">{formatoMoneda(fila.capital)}</td>
-                          <td className="px-4 py-3 text-red-600/80">{formatoMoneda(fila.interes)}</td>
-                          <td className={`px-4 py-3 ${fila.pagoExtra > 0 ? 'font-semibold text-green-600' : 'text-gray-400'}`}>{formatoMoneda(fila.pagoExtra)}</td>
-                          <td className="px-4 py-3 text-purple-600/80">{formatoMoneda(fila.segurosYComisiones)}</td>
-                          <td className="px-4 py-3 font-medium text-gray-900">{formatoMoneda(fila.saldoFinal)}</td>
-                          <td className="px-4 py-3 font-medium text-indigo-700 bg-indigo-50/20">{formatoMoneda(fila.sueldoMensual)}</td>
-                          <td className="px-4 py-3 font-medium text-indigo-700 bg-indigo-50/20">{formatoMoneda(fila.sueldoRestante)}</td>
-                        </tr>
-                        {fila.esFinDeAno && fila.saldoFinal > 0 && (
-                          <tr className="bg-gray-800 text-white">
-                            <td colSpan="10" className="px-4 py-2 text-center text-xs font-bold uppercase tracking-widest">
-                              --- Fin del Año {fila.anoCorrespondiente} • Saldo restante: {formatoMoneda(fila.saldoFinal)} ---
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
+                    {tabla.map((fila, i) => (
+                      <tr key={i} className={fila.pagoExtra > 0 ? 'bg-green-50/30' : ''}>
+                        <td className="px-4 py-3 font-bold">{fila.mes}</td>
+                        <td className="px-4 py-3 text-gray-500">{formatoMoneda(fila.saldoInicial)}</td>
+                        <td className="px-4 py-3 font-bold">{formatoMoneda(fila.pagoTotal)}</td>
+                        <td className="px-4 py-3">{formatoMoneda(fila.capital)}</td>
+                        <td className="px-4 py-3 text-red-500">{formatoMoneda(fila.interes)}</td>
+                        <td className="px-4 py-3 text-green-600 font-bold">{fila.pagoExtra > 0 ? formatoMoneda(fila.pagoExtra) : '-'}</td>
+                        <td className="px-4 py-3 font-bold text-blue-700">{formatoMoneda(fila.sueldoRestante)}</td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             </div>
-
           </div>
         </div>
       </div>
       
       <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
       `}} />
     </div>
   );
